@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "mr18-ui"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "nicegui>=2.0",
+    "xair-api",
+    "python-dotenv",
+    "numpy",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
