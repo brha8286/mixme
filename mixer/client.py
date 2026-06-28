@@ -56,9 +56,13 @@ class MixerClient:
 
     def _query_initial(self, mixer):
         for i in range(1, NUM_STRIPS + 1):
+            mixer.query(f'/ch/{i:02d}/mix/fader')
+            mixer.query(f'/ch/{i:02d}/mix/on')
             mixer.query(f'/ch/{i:02d}/config/name')
-            mixer.query(f'/headamp/{i:03d}/gain')
-            mixer.query(f'/headamp/{i:03d}/phantom')
+            mixer.query(f'/headamp/{i:02d}/gain')
+            mixer.query(f'/headamp/{i:02d}/phantom')
+        mixer.query('/lr/mix/fader')
+        mixer.query('/lr/mix/on')
         mixer.query('/lr/config/name')
 
     def _run(self):

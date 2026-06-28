@@ -1,6 +1,7 @@
 import math
 from nicegui import ui
 from mixer.client import MixerClient
+from mixer.pipewire import AirPlayControl
 from .utils import fader_to_db
 
 
@@ -33,8 +34,8 @@ def fader_strip(
     init_mute   = client.get(mute_addr)
     init_name   = (client.get(name_addr) if name_addr else None) or bottom_label
 
-    gain_addr    = f'/headamp/{ch:03d}/gain'    if ch else None
-    phantom_addr = f'/headamp/{ch:03d}/phantom' if ch else None
+    gain_addr    = f'/headamp/{ch:02d}/gain'    if ch else None
+    phantom_addr = f'/headamp/{ch:02d}/phantom' if ch else None
     meter_addr   = f'/ch/{ch:02d}/meter'        if ch else None
 
     init_gain    = float(client.get(gain_addr) or 0.0) if gain_addr else None
@@ -229,3 +230,71 @@ def fader_strip(
         registry[phantom_addr] = _upd_phantom
     if meter_addr:
         registry[meter_addr] = _upd_meter
+
+
+def airplay_strip(
+    control: AirPlayControl,
+    width_class: str = 'w-[72px]',
+):
+    """Fader strip that controls the shairport-sync PipeWire stream volume.
+
+    Returns a poll callable to be invoked on each UI timer tick.
+    """
+    is_muted = [control.muted]
+
+    with ui.column().classes(
+        f'items-center gap-0.5 bg-gray-800 rounded-lg px-1 pt-2 pb-1 '
+        f'{width_class} flex-shrink-0 select-none'
+    ):
+        # ── header: label + live indicator ──────────────────────────────
+        with ui.row().classes('items-center gap-1 w-full justify-center leading-none'):
+            activity_dot = ui.element('div').style(
+                'width:6px; height:6px; border-radius:50%; background:#374151; flex-shrink:0;'
+            )
+            ui.label('AirPlay').classes('text-[10px] text-gray-300 truncate')
+
+        # ── fader (0–1.5; unity at 1.0 ≈ ⅔ travel) ─────────────────────
+        with ui.row().classes('gap-0 items-stretch').style('height:200px'):
+            # blank spacer keeps fader aligned with channel strips
+            ui.element('div').style('width:6px;')
+            fader = (
+                ui.slider(min=0, max=1.5, step=0.01, value=control.volume)
+                .props('vertical reverse')
+                .style('height:190px; width:36px;')
+            )
+
+        db_lbl = (
+            ui.label(control.vol_to_db(control.volume))
+            .classes('text-[10px] text-gray-400 tabular-nums leading-none')
+        )
+
+        mute_btn = ui.button('M').classes('w-full text-xs h-6 font-bold rounded')
+
+        ui.label('AirPlay').classes('text-[10px] text-gray-600 leading-none')
+
+    # ── event handlers ───────────────────────────────────────────────────
+
+    def _apply_mute_style():
+        mute_btn.props('color=negative' if is_muted[0] else 'color=grey-8')
+
+    def _on_fader_change():
+        control.set_volume(fader.value)
+        db_lbl.set_text(control.vol_to_db(fader.value))
+
+    def _on_mute_click():
+        is_muted[0] = not is_muted[0]
+        control.set_muted(is_muted[0])
+        _apply_mute_style()
+
+    fader.on_value_change(_on_fader_change)
+    mute_btn.on_click(_on_mute_click)
+    _apply_mute_style()
+
+    # ── poll: update activity dot each UI tick ───────────────────────────
+    def poll():
+        color = '#22c55e' if control.active else '#374151'
+        activity_dot.style(
+            replace=f'width:6px; height:6px; border-radius:50%; background:{color}; flex-shrink:0;'
+        )
+
+    return poll
