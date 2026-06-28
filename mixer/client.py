@@ -1,13 +1,18 @@
 import logging
-import struct
+import subprocess
 import threading
 import time
 
+import numpy as np
 import xair_api
 
 log = logging.getLogger(__name__)
 
 NUM_STRIPS = 16
+_ALSA_DEVICE = 'hw:4,0'
+_ALSA_CHANNELS = 18
+_ALSA_RATE = 48000
+_ALSA_CHUNK = 4800  # 100 ms at 48 kHz
 
 
 class MixerClient:
@@ -19,6 +24,7 @@ class MixerClient:
         self._mixer = None
         self._running = False
         self.connected = False
+        self._alsa_proc: subprocess.Popen | None = None
 
     def get(self, addr: str):
         with self._lock:
@@ -37,17 +43,6 @@ class MixerClient:
     def _on_message(self, addr: str, *data):
         if not data:
             return
-
-        # meter blob: parse into per-channel float entries
-        if addr == '/meters/0':
-            blob = data[0]
-            if isinstance(blob, (bytes, bytearray)) and len(blob) >= NUM_STRIPS * 4:
-                floats = struct.unpack_from(f'<{len(blob) // 4}f', blob)
-                with self._lock:
-                    for i in range(NUM_STRIPS):
-                        self._state[f'/ch/{i + 1:02d}/meter'] = floats[i]
-            return
-
         if self._mixer:
             self._mixer._info_response = list(data)
         val = data[0] if len(data) == 1 else list(data)
@@ -64,6 +59,45 @@ class MixerClient:
         mixer.query('/lr/mix/fader')
         mixer.query('/lr/mix/on')
         mixer.query('/lr/config/name')
+
+    def _alsa_meter_loop(self):
+        """Read 18-ch USB audio from MR18 and compute RMS levels per channel."""
+        frame_bytes = _ALSA_CHANNELS * 4  # S32_LE = 4 bytes/sample
+        chunk_bytes = _ALSA_CHUNK * frame_bytes
+
+        while self._running:
+            try:
+                proc = subprocess.Popen(
+                    ['arecord', '-D', _ALSA_DEVICE,
+                     '-c', str(_ALSA_CHANNELS),
+                     '-r', str(_ALSA_RATE),
+                     '-f', 'S32_LE', '-q', '--'],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                )
+                self._alsa_proc = proc
+                log.info('ALSA meter reader started on %s', _ALSA_DEVICE)
+
+                while self._running:
+                    raw = proc.stdout.read(chunk_bytes)
+                    if len(raw) < chunk_bytes:
+                        break
+                    samples = np.frombuffer(raw, dtype='<i4').reshape(_ALSA_CHUNK, _ALSA_CHANNELS)
+                    rms = np.sqrt(np.mean(samples.astype(np.float64) ** 2, axis=0)) / 2 ** 31
+                    with self._lock:
+                        for i in range(NUM_STRIPS):
+                            self._state[f'/ch/{i + 1:02d}/meter'] = float(rms[i])
+                        self._state['/lr/meter'] = float(max(rms[16], rms[17]))
+
+            except Exception as e:
+                log.warning('ALSA meter error: %s', e)
+            finally:
+                if self._alsa_proc:
+                    self._alsa_proc.terminate()
+                    self._alsa_proc = None
+
+            if self._running:
+                time.sleep(2)  # retry after error
 
     def _run(self):
         try:
@@ -82,6 +116,10 @@ class MixerClient:
                 self._running = True
                 log.info('Connected to MR18 at %s', self.ip)
 
+                threading.Thread(
+                    target=self._alsa_meter_loop, daemon=True
+                ).start()
+
                 while self._running:
                     mixer.send('/xremote')
                     time.sleep(8)
@@ -98,3 +136,5 @@ class MixerClient:
 
     def stop(self):
         self._running = False
+        if self._alsa_proc:
+            self._alsa_proc.terminate()

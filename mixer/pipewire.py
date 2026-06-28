@@ -1,35 +1,42 @@
 import logging
 import math
 import os
+import re
 import subprocess
 import threading
 import time
 
 log = logging.getLogger(__name__)
 
-_PULSE_ENV = {
+_PW_ENV = {
     **os.environ,
     'XDG_RUNTIME_DIR': f'/run/user/{os.getuid()}',
     'PIPEWIRE_RUNTIME_DIR': f'/run/user/{os.getuid()}',
 }
 
 
-def _pactl(*args, timeout: float = 2.0) -> str:
+def _wpctl(*args, timeout: float = 2.0) -> str:
     result = subprocess.run(
-        ['pactl', *args],
-        capture_output=True, text=True, env=_PULSE_ENV, timeout=timeout,
+        ['wpctl', *args],
+        capture_output=True, text=True, env=_PW_ENV, timeout=timeout,
     )
     return result.stdout
 
 
-def _find_shairport_sink_input() -> int | None:
-    current_id = None
-    for line in _pactl('list', 'sink-inputs').splitlines():
-        line = line.strip()
-        if line.startswith('Sink Input #'):
-            current_id = int(line.split('#')[1])
-        elif 'shairport' in line.lower() and current_id is not None:
-            return current_id
+def _find_shairport_stream_id() -> int | None:
+    """Return the wpctl node ID of the active shairport-sync audio stream."""
+    in_streams = False
+    for line in _wpctl('status').splitlines():
+        if 'Streams:' in line:
+            in_streams = True
+            continue
+        if in_streams:
+            # A new top-level section (Video, Settings, etc.) ends the Audio Streams block
+            if line and not line[0].isspace():
+                break
+            m = re.match(r'\s{6,8}(\d+)\.\s+Shairport Sync', line)
+            if m:
+                return int(m.group(1))
     return None
 
 
@@ -77,14 +84,14 @@ class AirPlayControl:
 
     def _apply(self):
         try:
-            sink_id = _find_shairport_sink_input()
+            stream_id = _find_shairport_stream_id()
             with self._lock:
-                self._active = sink_id is not None
+                self._active = stream_id is not None
                 vol = self._volume
                 muted = self._muted
-            if sink_id is not None:
-                _pactl('set-sink-input-volume', str(sink_id), f'{int(vol * 100)}%')
-                _pactl('set-sink-input-mute',  str(sink_id), '1' if muted else '0')
+            if stream_id is not None:
+                _wpctl('set-volume', str(stream_id), str(round(vol, 3)))
+                _wpctl('set-mute',   str(stream_id), '1' if muted else '0')
         except Exception as e:
             log.debug('AirPlay apply error: %s', e)
 

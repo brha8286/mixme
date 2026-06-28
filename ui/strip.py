@@ -36,7 +36,7 @@ def fader_strip(
 
     gain_addr    = f'/headamp/{ch:02d}/gain'    if ch else None
     phantom_addr = f'/headamp/{ch:02d}/phantom' if ch else None
-    meter_addr   = f'/ch/{ch:02d}/meter'        if ch else None
+    meter_addr   = f'/ch/{ch:02d}/meter'        if ch else '/lr/meter'
 
     init_gain    = float(client.get(gain_addr) or 0.0) if gain_addr else None
     init_phantom = int(client.get(phantom_addr) or 0)  if phantom_addr else 0
@@ -82,15 +82,16 @@ def fader_strip(
 
         # ── fader + meter row ───────────────────────────────────────────
         with ui.row().classes('gap-0 items-stretch').style('height:200px'):
-            # meter bar — gradient bg with dark overlay that shrinks from top as signal rises
+            # meter bar — dark container, gradient bar grows from the bottom
             with ui.element('div').style(
                 'width:6px; height:100%; border-radius:3px; overflow:hidden; position:relative; '
-                'background: linear-gradient(to top, #22c55e 0%, #eab308 70%, #ef4444 90%);'
+                'background:#1f2937;'
             ):
                 meter_fill = (
                     ui.element('div')
-                    .style('position:absolute; top:0; left:0; width:100%; height:100%; '
-                           'background:#1f2937; transition:height 0.06s linear;')
+                    .style('position:absolute; bottom:0; left:0; width:100%; height:0%; '
+                           'background:linear-gradient(to top,#22c55e 0%,#eab308 70%,#ef4444 90%); '
+                           'transition:height 0.06s linear;')
                 )
 
             # fader
@@ -214,10 +215,10 @@ def fader_strip(
             peak_age[0] += 1
             if peak_age[0] > 8:
                 peak_val[0] = max(peak_val[0] - 3, pct)
-        cover = 100 - peak_val[0]
         meter_fill.style(
-            replace=f'position:absolute; top:0; left:0; width:100%; height:{cover:.1f}%; '
-                    'background:#1f2937; transition:height 0.06s linear;'
+            replace=f'position:absolute; bottom:0; left:0; width:100%; height:{peak_val[0]:.1f}%; '
+                    'background:linear-gradient(to top,#22c55e 0%,#eab308 70%,#ef4444 90%); '
+                    'transition:height 0.06s linear;'
         )
 
     registry[fader_addr]   = _upd_fader
