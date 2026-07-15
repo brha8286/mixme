@@ -85,8 +85,10 @@ class MixerClient:
                     samples = np.frombuffer(raw, dtype='<i4').reshape(_ALSA_CHUNK, _ALSA_CHANNELS)
                     rms = np.sqrt(np.mean(samples.astype(np.float64) ** 2, axis=0)) / 2 ** 31
                     with self._lock:
-                        for i in range(NUM_STRIPS):
-                            self._state[f'/ch/{i + 1:02d}/meter'] = float(rms[i])
+                        # MR18's 18-ch USB capture enumerates starting at channel 6 and
+                        # wraps to 1-5 at the end (confirmed empirically), not 1:1 by index.
+                        for ch in range(1, NUM_STRIPS + 1):
+                            self._state[f'/ch/{ch:02d}/meter'] = float(rms[(ch - 6) % 16])
                         self._state['/lr/meter'] = float(max(rms[16], rms[17]))
 
             except Exception as e:
@@ -126,9 +128,12 @@ class MixerClient:
         except Exception as e:
             log.error('Mixer connection failed: %s', e)
             self.connected = False
+            self._running = False
             self.status = f'Error: {e}'
 
     def connect(self, ip: str):
+        if self._running:
+            return  # already connected, ignore duplicate calls
         self.ip = ip
         self._state.clear()
         self.connected = False
