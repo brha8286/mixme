@@ -10,6 +10,18 @@ def _db_gain(raw: float) -> str:
     return f'{db:+.0f}dB'
 
 
+_METER_H = 200   # px — meter column height, must match the fader row height
+
+# Gradient is sized/anchored to the full meter column, not to the fill element,
+# so the green/yellow/red zones stay at fixed heights as the bar grows.
+_METER_STYLE = (
+    'position:absolute; bottom:0; left:0; width:100%; '
+    'background-image:linear-gradient(to top,#22c55e 0%,#eab308 70%,#ef4444 90%); '
+    f'background-size:100% {_METER_H}px; background-position:left bottom; '
+    'background-repeat:no-repeat; transition:height 0.06s linear;'
+)
+
+
 def _meter_pct(linear: float) -> float:
     """Convert linear amplitude 0–1 to 0–100 % for meter bar."""
     if linear <= 0:
@@ -87,12 +99,7 @@ def fader_strip(
                 'width:6px; height:100%; border-radius:3px; overflow:hidden; position:relative; '
                 'background:#1f2937;'
             ):
-                meter_fill = (
-                    ui.element('div')
-                    .style('position:absolute; bottom:0; left:0; width:100%; height:0%; '
-                           'background:linear-gradient(to top,#22c55e 0%,#eab308 70%,#ef4444 90%); '
-                           'transition:height 0.06s linear;')
-                )
+                meter_fill = ui.element('div').style(_METER_STYLE + ' height:0%;')
 
             # fader
             fader = (
@@ -215,11 +222,7 @@ def fader_strip(
             peak_age[0] += 1
             if peak_age[0] > 8:
                 peak_val[0] = max(peak_val[0] - 3, pct)
-        meter_fill.style(
-            replace=f'position:absolute; bottom:0; left:0; width:100%; height:{peak_val[0]:.1f}%; '
-                    'background:linear-gradient(to top,#22c55e 0%,#eab308 70%,#ef4444 90%); '
-                    'transition:height 0.06s linear;'
-        )
+        meter_fill.style(replace=_METER_STYLE + f' height:{peak_val[0]:.1f}%;')
 
     registry[fader_addr]   = _upd_fader
     registry[mute_addr]    = _upd_mute

@@ -58,11 +58,23 @@ Service: `sudo systemctl status shairport-sync`
 ```
 /ch/{01-16}/mix/fader     — channel fader (0.0–1.0)
 /ch/{01-16}/mix/on        — channel mute (1=on/unmuted, 0=muted)
+/ch/{01-16}/mix/lr        — LR bus assign (0/1) — used by the LR meter sum
 /ch/{01-16}/config/name   — channel label (string)
 /headamp/{01-16}/gain     — preamp gain (0.0–1.0)
 /headamp/{01-16}/phantom  — phantom power (0/1)
-/meters/0                 — meter blob (16× float32 LE)
 /lr/mix/fader             — LR master fader
 /lr/mix/on                — LR master mute
 /xremote                  — keepalive (sent every 8 s to stay subscribed)
 ```
+
+Firmware 1.17 does not answer any `/meters/...` request, so all metering comes
+from the 18-channel USB capture (`hw:4,0`) read by `_alsa_meter_loop`.
+
+## Metering
+
+Capture channels carry **inputs only** — 1-16 are the mic inputs (rotated: index
+`(ch - 6) % 16`), and 17/18 are the RCA aux input, *not* the LR mix. There is no
+hardware tap for LR, so `/lr/meter` is summed in software from the per-channel
+levels: each channel is scaled by its fader taper, dropped if muted or unassigned
+from LR, power-summed, then scaled by the LR fader/mute. Pan and channel
+EQ/dynamics are not modelled, so it tracks level, not the exact bus signal.

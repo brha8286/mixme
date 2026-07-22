@@ -1,4 +1,5 @@
 import logging
+import math
 import subprocess
 import threading
 import time
@@ -13,6 +14,24 @@ _ALSA_DEVICE = 'hw:4,0'
 _ALSA_CHANNELS = 18
 _ALSA_RATE = 48000
 _ALSA_CHUNK = 4800  # 100 ms at 48 kHz
+
+
+def _fader_gain(val: float) -> float:
+    """Normalized fader (0.0–1.0) → linear amplitude gain (X-Air fader taper).
+
+    Inverse of ui.utils.fader_to_db; kept here so the meter thread has no UI import.
+    """
+    if val <= 0:
+        return 0.0
+    if val >= 0.5:
+        db = 40 * val - 30
+    elif val >= 0.25:
+        db = 80 * val - 50
+    elif val >= 0.0625:
+        db = 160 * val - 70
+    else:
+        db = 480 * val - 90
+    return 10 ** (db / 20)
 
 
 class MixerClient:
@@ -53,12 +72,39 @@ class MixerClient:
         for i in range(1, NUM_STRIPS + 1):
             mixer.query(f'/ch/{i:02d}/mix/fader')
             mixer.query(f'/ch/{i:02d}/mix/on')
+            mixer.query(f'/ch/{i:02d}/mix/lr')
             mixer.query(f'/ch/{i:02d}/config/name')
             mixer.query(f'/headamp/{i:02d}/gain')
             mixer.query(f'/headamp/{i:02d}/phantom')
         mixer.query('/lr/mix/fader')
         mixer.query('/lr/mix/on')
         mixer.query('/lr/config/name')
+
+    # The three helpers below read _state directly and must be called with the
+    # lock already held (the meter loop holds it for the whole update).
+
+    def _num(self, addr: str, default: float = 0.0) -> float:
+        try:
+            return float(self._state[addr])
+        except (KeyError, TypeError, ValueError):
+            return default
+
+    def _lr_contribution(self, ch: int, level: float) -> float:
+        """Power a channel's post-fader signal adds to the LR bus.
+
+        USB capture taps inputs pre-fader, so fader/mute/LR-assign are applied
+        here. Pan and channel EQ/dynamics are not modelled.
+        """
+        if self._state.get(f'/ch/{ch:02d}/mix/on') == 0:      # muted
+            return 0.0
+        if self._state.get(f'/ch/{ch:02d}/mix/lr') == 0:      # not assigned to LR
+            return 0.0
+        return (level * _fader_gain(self._num(f'/ch/{ch:02d}/mix/fader'))) ** 2
+
+    def _lr_gain(self) -> float:
+        if self._state.get('/lr/mix/on') == 0:
+            return 0.0
+        return _fader_gain(self._num('/lr/mix/fader'))
 
     def _alsa_meter_loop(self):
         """Read 18-ch USB audio from MR18 and compute RMS levels per channel."""
@@ -87,9 +133,14 @@ class MixerClient:
                     with self._lock:
                         # MR18's 18-ch USB capture enumerates starting at channel 6 and
                         # wraps to 1-5 at the end (confirmed empirically), not 1:1 by index.
+                        # Capture channels 17/18 are the RCA aux input, NOT the LR mix —
+                        # the USB stream carries inputs only, so LR is summed below.
+                        lr_power = 0.0
                         for ch in range(1, NUM_STRIPS + 1):
-                            self._state[f'/ch/{ch:02d}/meter'] = float(rms[(ch - 6) % 16])
-                        self._state['/lr/meter'] = float(max(rms[16], rms[17]))
+                            level = float(rms[(ch - 6) % 16])
+                            self._state[f'/ch/{ch:02d}/meter'] = level
+                            lr_power += self._lr_contribution(ch, level)
+                        self._state['/lr/meter'] = min(1.0, math.sqrt(lr_power) * self._lr_gain())
 
             except Exception as e:
                 log.warning('ALSA meter error: %s', e)
