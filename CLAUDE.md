@@ -62,19 +62,66 @@ Service: `sudo systemctl status shairport-sync`
 /ch/{01-16}/config/name   — channel label (string)
 /headamp/{01-16}/gain     — preamp gain (0.0–1.0)
 /headamp/{01-16}/phantom  — phantom power (0/1)
+/ch/{01-16}/preamp/rtnsw  — USB return on/off (1 = channel is fed from USB)
 /lr/mix/fader             — LR master fader
 /lr/mix/on                — LR master mute
 /xremote                  — keepalive (sent every 8 s to stay subscribed)
 ```
 
-Firmware 1.17 does not answer any `/meters/...` request, so all metering comes
-from the 18-channel USB capture (`hw:4,0`) read by `_alsa_meter_loop`.
+Firmware 1.17 answers no `/meters/...` request and no `/routing/...` request
+(both probed, zero responses), so metering is assembled from two capture paths
+instead. Anything needing a mixer-side tap point is simply unavailable.
 
 ## Metering
 
-Capture channels carry **inputs only** — 1-16 are the mic inputs (rotated: index
-`(ch - 6) % 16`), and 17/18 are the RCA aux input, *not* the LR mix. There is no
-hardware tap for LR, so `/lr/meter` is summed in software from the per-channel
-levels: each channel is scaled by its fader taper, dropped if muted or unassigned
-from LR, power-summed, then scaled by the LR fader/mute. Pan and channel
-EQ/dynamics are not modelled, so it tracks level, not the exact bus signal.
+Meters come from two sources because neither one covers every channel.
+
+**1. USB capture (`hw:4,0`) — `MixerClient._alsa_meter_loop`.** Carries the 18
+**inputs only** — the 16 mic preamps plus the RCA aux input, never the LR mix.
+The stream is rotated by a constant +10, so mixer channel N is at index
+`(N + 10) % 18` and the aux pair lands at indices 9/10.
+
+The rotation is mod **18** (the frame width), not mod 16. A previous `(ch-6)%16`
+version agreed only for ch 1-5 — enough to look "confirmed" when tested on PC
+L/R — and was silently 2 strips off for ch 6-16. Anchors: ch 3/4 → idx 13/14 and
+ch 15/16 → idx 7/8, both measured against known sources. Note the send tap
+appears to sit *ahead* of the preamp gain, so gain changes cannot be used to
+identify a channel's index; drive a known input instead.
+
+**2. PipeWire sink monitor — `SinkMonitorMeters` in `mixer/pipewire.py`.** The
+USB send taps each channel at the analog preamp, **before** the USB-return
+switch — presumably so USB out → channel → USB in can't feed back. So a channel
+fed from USB (AirPlay, a DAW) reads digital silence in the capture stream no
+matter how loud it is; verified by measuring −110 dBFS on ch 1/2 while audio was
+plainly audible. Monitoring what *we* send to the MR18 PipeWire sink recovers
+those levels. Sink channel N is assumed to feed mixer channel N (default
+`rtnsrc`), and `rtntrim` is not applied.
+
+The meter loop uses source 2 for any channel with `preamp/rtnsw == 1` and source
+1 otherwise. **This only works while the MR18 PipeWire sink exists** — see the
+exclusive-access note below.
+
+There is no hardware tap for LR at all, so `/lr/meter` is summed in software
+from the per-channel levels: each channel scaled by its fader taper, dropped if
+muted or unassigned from LR, power-summed, then scaled by the LR fader/mute.
+Pan and channel EQ/dynamics are not modelled, so it tracks level, not the exact
+bus signal.
+
+## Exclusive device access (DAWs)
+
+Any app taking the MR18 on the **raw ALSA backend** (Ardour's default) holds the
+USB device exclusively, and the `MR18 Multichannel` PipeWire sink disappears.
+Two things then break silently:
+
+- shairport-sync's configured `sink_target` no longer exists, so AirPlay falls
+  back to the default sink — it keeps playing, just not into the MR18.
+- USB-return channels stop metering (source 2 above is gone); they read zero
+  rather than erroring.
+
+Run DAWs on the PipeWire backend (`pw-jack ardour`) so the device stays shared.
+Note both `jackd2` and `pipewire-jack` are installed — picking "JACK" in a DAW
+may start real jackd2, which grabs the device exclusively just like ALSA does.
+
+Playback and capture are *separate* ALSA substreams, so a DAW using playback
+only does not disturb the meter reader. A DAW capturing from the MR18 does
+fight it — `arecord` holds the capture substream, and one of the two loses.

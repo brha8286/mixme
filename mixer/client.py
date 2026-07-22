@@ -7,6 +7,8 @@ import time
 import numpy as np
 import xair_api
 
+from .pipewire import SinkMonitorMeters
+
 log = logging.getLogger(__name__)
 
 NUM_STRIPS = 16
@@ -44,6 +46,7 @@ class MixerClient:
         self._running = False
         self.connected = False
         self._alsa_proc: subprocess.Popen | None = None
+        self._usb_meters = SinkMonitorMeters()
 
     def get(self, addr: str):
         with self._lock:
@@ -76,6 +79,7 @@ class MixerClient:
             mixer.query(f'/ch/{i:02d}/config/name')
             mixer.query(f'/headamp/{i:02d}/gain')
             mixer.query(f'/headamp/{i:02d}/phantom')
+            mixer.query(f'/ch/{i:02d}/preamp/rtnsw')   # USB return on/off
         mixer.query('/lr/mix/fader')
         mixer.query('/lr/mix/on')
         mixer.query('/lr/config/name')
@@ -130,14 +134,25 @@ class MixerClient:
                         break
                     samples = np.frombuffer(raw, dtype='<i4').reshape(_ALSA_CHUNK, _ALSA_CHANNELS)
                     rms = np.sqrt(np.mean(samples.astype(np.float64) ** 2, axis=0)) / 2 ** 31
+                    # Fetched before taking our own lock — SinkMonitorMeters has one too.
+                    usb = self._usb_meters.levels
                     with self._lock:
-                        # MR18's 18-ch USB capture enumerates starting at channel 6 and
-                        # wraps to 1-5 at the end (confirmed empirically), not 1:1 by index.
-                        # Capture channels 17/18 are the RCA aux input, NOT the LR mix —
-                        # the USB stream carries inputs only, so LR is summed below.
+                        # The 18-ch USB capture is rotated by a constant +10: mixer
+                        # channel N arrives at index (N + 10) % 18, and the aux input
+                        # (17/18) lands at indices 9/10. The rotation is mod *18* — the
+                        # frame width — not mod 16; a previous mod-16 version happened to
+                        # agree for ch 1-5 and was wrong for ch 6-16.
+                        # No index carries the LR mix (the stream is inputs only), so LR
+                        # is summed in software below.
                         lr_power = 0.0
                         for ch in range(1, NUM_STRIPS + 1):
-                            level = float(rms[(ch - 6) % 16])
+                            level = float(rms[(ch + 10) % 18])
+                            # A USB-fed channel is silent in the capture stream (the
+                            # send taps ahead of the USB-return switch), so use what
+                            # we send to sink channel N instead — assumed 1:1 with
+                            # mixer channel N, which is how rtnsrc ships by default.
+                            if self._state.get(f'/ch/{ch:02d}/preamp/rtnsw') == 1 and ch <= len(usb):
+                                level = usb[ch - 1]
                             self._state[f'/ch/{ch:02d}/meter'] = level
                             lr_power += self._lr_contribution(ch, level)
                         self._state['/lr/meter'] = min(1.0, math.sqrt(lr_power) * self._lr_gain())
@@ -172,6 +187,7 @@ class MixerClient:
                 threading.Thread(
                     target=self._alsa_meter_loop, daemon=True
                 ).start()
+                self._usb_meters.start()
 
                 while self._running:
                     mixer.send('/xremote')
@@ -192,5 +208,6 @@ class MixerClient:
 
     def stop(self):
         self._running = False
+        self._usb_meters.stop()
         if self._alsa_proc:
             self._alsa_proc.terminate()
