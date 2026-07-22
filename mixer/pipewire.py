@@ -76,16 +76,32 @@ def _linked_to_sink(sink: str, node: str) -> bool:
     sink's monitor rather than ending the stream, and we would then report an
     unrelated device's audio as MR18 USB-return levels. `node.dont-reconnect`
     does not prevent this (tested — the stream survived its target's death).
+
+    The full graph is parsed rather than using `pw-link -l <out> <in>`: that
+    form lists links touching *either* pattern, so it answers True whenever
+    both nodes merely exist, even when they are wired to different devices.
     """
     try:
         out = subprocess.run(
-            ['pw-link', '-l', sink, node],
-            capture_output=True, text=True, env=_PW_ENV, timeout=3,
+            ['pw-link', '-l'], capture_output=True, text=True, env=_PW_ENV, timeout=3,
         ).stdout
-        return bool(out.strip())
     except Exception as e:
         log.debug('link check failed: %s', e)
         return False
+
+    # Output is a port line followed by indented "|-> peer" / "|<- peer" lines.
+    port = ''
+    for line in out.splitlines():
+        stripped = line.strip()
+        if not line[:1].isspace():
+            port = stripped
+            continue
+        peer = stripped.lstrip('|<->').strip()
+        pair = (port, peer)
+        if any(p.startswith(f'{node}:') for p in pair) and \
+           any(p.startswith(f'{sink}:') for p in pair):
+            return True
+    return False
 
 
 class SinkMonitorMeters:

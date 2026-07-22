@@ -191,6 +191,11 @@ class MixerClient:
 
                 while self._running:
                     mixer.send('/xremote')
+                    # Re-query the USB-return switches: a reply dropped during the
+                    # startup burst would otherwise leave those channels metering
+                    # from the analog tap, which is silent for USB-fed channels.
+                    for i in range(1, NUM_STRIPS + 1):
+                        mixer.query(f'/ch/{i:02d}/preamp/rtnsw')
                     time.sleep(8)
         except Exception as e:
             log.error('Mixer connection failed: %s', e)
